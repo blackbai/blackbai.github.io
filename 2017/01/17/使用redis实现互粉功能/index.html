@@ -1,95 +1,17 @@
-<!DOCTYPE html><html lang="zh-cn"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1.0,minimum-scale=1.0,maximum-scale=1.0,user-scalable=no"><meta name="format-detection" content="telephone=no"><meta name="format-detection" content="email=no"><meta name="description"><meta name="keywords" content="Hexo, Php, Redis, Swoole, Laravel,CI,Js"><title>使用redis实现互粉功能 - SLOWLY</title><link rel="stylesheet" href="/css/main_style.min.css"><link rel="icon" href="/favicon.ico"></head><body><div class="post-header"><img class="background" src="/default_images/post_background.jpg"><div class="post-title"><h1 class="title">使用redis实现互粉功能</h1><ul class="meta"><li><i class="icon icon-author"></i>Black Jun</li><li><i class="icon icon-clock"></i>7 Minutes</li><li><i class="icon icon-calendar"></i>January 17, 2017</li></ul></div></div><div class="article-content"><h1 id="使用redis实现互粉"><a href="#使用redis实现互粉" class="headerlink" title="使用redis实现互粉"></a>使用redis实现互粉</h1><blockquote>
+<!DOCTYPE html><html lang="zh-cn"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1.0,minimum-scale=1.0,maximum-scale=1.0,user-scalable=no"><meta name="format-detection" content="telephone=no"><meta name="format-detection" content="email=no"><meta name="description"><meta name="keywords" content="Hexo, Php, Redis, Swoole, Laravel,CI,Js"><title>使用redis实现互粉功能 - SLOWLY</title><link rel="stylesheet" href="/css/main_style.min.css"><link rel="icon" href="/favicon.ico"></head><body><div class="post-header"><img class="background" src="/default_images/post_background.jpg"><div class="post-title"><h1 class="title">使用redis实现互粉功能</h1><ul class="meta"><li><i class="icon icon-author"></i>Black Jun</li><li><i class="icon icon-clock"></i>11 Minutes</li><li><i class="icon icon-calendar"></i>January 17, 2017</li></ul></div></div><div class="article-content"><h1 id="使用redis实现互粉"><a href="#使用redis实现互粉" class="headerlink" title="使用redis实现互粉"></a>使用redis实现互粉</h1><blockquote>
 <p>最近在写api的时候要实现一个相互关注的功能，发现如果用mysql做查询不是很理想，<br>  所以想能不能用redis来实现这个功能，网上一搜有很多实现的方法，结合网上的博文，<br>  实现了自己的功能。</p>
 </blockquote>
 <h2 id="1-数据库实现"><a href="#1-数据库实现" class="headerlink" title="1.数据库实现"></a>1.数据库实现</h2><p>一下是数据库的代码，通过保存用户的id和关注对象的id以及关注状态来判断用户的关注列<br>表和粉丝列表，通过联查获取用户的基本信息，入头像、名称。</p>
-<pre><code>&apos;DROP TABLE IF EXISTS `shc_sns`;
- CREATE TABLE `shc_sns` (
-   `sns_id` int(11) NOT NULL AUTO_INCREMENT COMMENT &apos;id值&apos;,
-   `sns_frommid` int(11) NOT NULL COMMENT &apos;会员id&apos;,
-   `sns_tomid` int(11) NOT NULL COMMENT &apos;朋友id&apos;,
-   `sns_addtime` int(11) NOT NULL COMMENT &apos;添加时间&apos;,
-   `sns_followstate` tinyint(1) NOT NULL DEFAULT &apos;1&apos; COMMENT &apos;关注状态 1为单方关注 2为双方关注&apos;,
-   PRIMARY KEY (`sns_id`),
-   KEY `FROMMID` (`sns_frommid`) USING BTREE,
-   KEY `TOMID` (`sns_tomid`,`sns_frommid`) USING BTREE,
-   KEY `FRIEND_IDS` (`sns_tomid`) USING BTREE
- ) ENGINE=InnoDB AUTO_INCREMENT=196 DEFAULT CHARSET=utf8 ROW_FORMAT=DYNAMIC COMMENT=&apos;好友数据表&apos;;
-&apos;
-</code></pre><h2 id="2-使用redis实现"><a href="#2-使用redis实现" class="headerlink" title="2.使用redis实现"></a>2.使用redis实现</h2><p>redis提供了很多的类型，这里我们使用’zadd’添加有序集合来实现。如果不了解’zadd’命令的<br>可以点击查看这个<a href="http://www.yiibai.com/redis/sorted_sets_zadd.html" target="_blank" rel="external">redis zdd命令</a></p>
-<h3 id="1-关注"><a href="#1-关注" class="headerlink" title="1.关注"></a>1.关注</h3><p> 关注分为2个步骤，第一部是把对方加入到自己的关注list里面，第二步是将我写入到对方<br> 的粉丝中，这里score是通过时间戳生成的方便之后做分页查询，代码如下</p>
-<pre><code>public function addFollowsFansById($data){
-        if(empty($data)) return false;
-        $data[&apos;sns_addtime&apos;] = time();
-        if($data[&apos;sns_followstate&apos;] == 1){//单方面关注
-            $result = $this-&gt;addFollowFan($data);//添加到数据库
-            if($result){//添加到有序集合
-                $this-&gt;cache-&gt;redis-&gt;zAdd(&apos;shc_follow:&apos;.$data[&apos;sns_frommid&apos;],time(),$data[&apos;sns_tomid&apos;]);
-                $this-&gt;cache-&gt;redis-&gt;zAdd(&apos;shc_fans:&apos;.$data[&apos;sns_tomid&apos;],time(),$data[&apos;sns_frommid&apos;]);
-            }
-            return true;
-        }elseif($data[&apos;sns_followstate&apos;] == 2){//相互关注
-            $this-&gt;db-&gt;trans_begin();
-            $this-&gt;addFollowFan($data);
-            $this-&gt;editFollowFans([&apos;sns_frommid&apos;=&gt;$data[&apos;sns_tomid&apos;],&apos;sns_tomid&apos;=&gt;$data[&apos;sns_frommid&apos;]],[&apos;sns_followstate&apos;=&gt;2]);
-            if($this-&gt;db-&gt;trans_status() === false){
-                $this-&gt;db-&gt;trans_rollback();
-                return false;
-            }else{
-                $this-&gt;db-&gt;trans_commit();
-                $this-&gt;cache-&gt;redis-&gt;zAdd(&apos;shc_follow:&apos;.$data[&apos;sns_frommid&apos;],time(),$data[&apos;sns_tomid&apos;]);
-                $this-&gt;cache-&gt;redis-&gt;zAdd(&apos;shc_fans:&apos;.$data[&apos;sns_tomid&apos;],time(),$data[&apos;sns_frommid&apos;]);
-                return true;
-            }
-        }else{
-            return false;
-        }
-    }
-</code></pre><h3 id="2-取消关注"><a href="#2-取消关注" class="headerlink" title="2.取消关注"></a>2.取消关注</h3><p>取消关注也分为2个步骤，第一步从我的关注列表中删除对方，第二步从对方的粉丝列表中<br>删除我，这里用redis的’zrem’来实现从有序集合中删除记录，<a href="https://redis.io/commands/zrem" target="_blank" rel="external">redis zrem命令</a></p>
-<pre><code>public function deleteFollowFansById($user_id,$follow_id,$state){
-        if($state == 1){
-            $result = $this-&gt;deleteFollowFans([&apos;sns_frommid&apos;=&gt;$user_id,&apos;sns_tomid&apos;=&gt;$follow_id]);
-            if($result){//缓存删除关注
-                $this-&gt;cache-&gt;redis-&gt;zRem(&apos;shc_follow:&apos;.$user_id,$follow_id);
-                $this-&gt;cache-&gt;redis-&gt;zRem(&apos;shc_fans:&apos;.$follow_id,$user_id);
-            }
-            return true;
-        }elseif($state == 2){
-            //开启事务
-            $this-&gt;db-&gt;trans_begin();
-            $this-&gt;deleteFollowFans([&apos;sns_frommid&apos;=&gt;$user_id,&apos;sns_tomid&apos;=&gt;$follow_id]);
-            $this-&gt;editFollowFans([&apos;sns_frommid&apos;=&gt;$follow_id,&apos;sns_tomid&apos;=&gt;$user_id],[&apos;sns_followstate&apos;=&gt;1]);
-            if($this-&gt;db-&gt;trans_status() === false){
-                $this-&gt;db-&gt;trans_rollback();
-                return false;
-            }else{
-                $this-&gt;cache-&gt;redis-&gt;zRem(&apos;shc_follow:&apos;.$user_id,$follow_id);
-                $this-&gt;cache-&gt;redis-&gt;zRem(&apos;shc_fans:&apos;.$follow_id,$user_id);
-                $this-&gt;db-&gt;trans_commit();
-                return true;
-            }
-        }else{
-            return false;
-        }
-    }
-</code></pre><h3 id="3-查看关注列表、粉丝列表"><a href="#3-查看关注列表、粉丝列表" class="headerlink" title="3.查看关注列表、粉丝列表"></a>3.查看关注列表、粉丝列表</h3><p>查看关注、粉丝列表原理一样，用redis的’zrange’，’zrange’的形式如下</p>
+   <figure class="highlight plain"><table><tr><td class="gutter"><pre><div class="line">1</div><div class="line">2</div><div class="line">3</div><div class="line">4</div><div class="line">5</div><div class="line">6</div><div class="line">7</div><div class="line">8</div><div class="line">9</div><div class="line">10</div><div class="line">11</div><div class="line">12</div></pre></td><td class="code"><pre><div class="line">DROP TABLE IF EXISTS `shc_sns`;</div><div class="line">  CREATE TABLE `shc_sns` (</div><div class="line">    `sns_id` int(11) NOT NULL AUTO_INCREMENT COMMENT &apos;id值&apos;,</div><div class="line">    `sns_frommid` int(11) NOT NULL COMMENT &apos;会员id&apos;,</div><div class="line">    `sns_tomid` int(11) NOT NULL COMMENT &apos;朋友id&apos;,</div><div class="line">    `sns_addtime` int(11) NOT NULL COMMENT &apos;添加时间&apos;,</div><div class="line">    `sns_followstate` tinyint(1) NOT NULL DEFAULT &apos;1&apos; COMMENT &apos;关注状态 1为单方关注 2为双方关注&apos;,</div><div class="line">    PRIMARY KEY (`sns_id`),</div><div class="line">    KEY `FROMMID` (`sns_frommid`) USING BTREE,</div><div class="line">    KEY `TOMID` (`sns_tomid`,`sns_frommid`) USING BTREE,</div><div class="line">    KEY `FRIEND_IDS` (`sns_tomid`) USING BTREE</div><div class="line">  ) ENGINE=InnoDB AUTO_INCREMENT=196 DEFAULT CHARSET=utf8 ROW_FORMAT=DYNAMIC COMMENT=&apos;好友数据表&apos;;</div></pre></td></tr></table></figure>
+<h2 id="2-使用redis实现"><a href="#2-使用redis实现" class="headerlink" title="2.使用redis实现"></a>2.使用redis实现</h2><p>redis提供了很多的类型，这里我们使用’zadd’添加有序集合来实现。如果不了解’zadd’命令的<br>可以点击查看这个<a href="http://www.yiibai.com/redis/sorted_sets_zadd.html" target="_blank" rel="external">redis zdd命令</a></p>
+<h3 id="1-关注"><a href="#1-关注" class="headerlink" title="1.关注"></a>1.关注</h3><p> 关注分为2个步骤，第一部是把对方加入到自己的关注list里面，第二步是将我写入到对方<br> 的粉丝中，这里score是通过时间戳生成的方便之后做分页查询，代码如下<br>    <figure class="highlight plain"><table><tr><td class="gutter"><pre><div class="line">1</div><div class="line">2</div><div class="line">3</div><div class="line">4</div><div class="line">5</div><div class="line">6</div><div class="line">7</div><div class="line">8</div><div class="line">9</div><div class="line">10</div><div class="line">11</div><div class="line">12</div><div class="line">13</div><div class="line">14</div><div class="line">15</div><div class="line">16</div><div class="line">17</div><div class="line">18</div><div class="line">19</div><div class="line">20</div><div class="line">21</div><div class="line">22</div><div class="line">23</div><div class="line">24</div><div class="line">25</div><div class="line">26</div><div class="line">27</div></pre></td><td class="code"><pre><div class="line">public function addFollowsFansById($data)&#123;</div><div class="line">        if(empty($data)) return false;</div><div class="line">        $data[&apos;sns_addtime&apos;] = time();</div><div class="line">        if($data[&apos;sns_followstate&apos;] == 1)&#123;//单方面关注</div><div class="line">            $result = $this-&gt;addFollowFan($data);//添加到数据库</div><div class="line">            if($result)&#123;//添加到有序集合</div><div class="line">                $this-&gt;cache-&gt;redis-&gt;zAdd(&apos;shc_follow:&apos;.$data[&apos;sns_frommid&apos;],time(),$data[&apos;sns_tomid&apos;]);</div><div class="line">                $this-&gt;cache-&gt;redis-&gt;zAdd(&apos;shc_fans:&apos;.$data[&apos;sns_tomid&apos;],time(),$data[&apos;sns_frommid&apos;]);</div><div class="line">            &#125;</div><div class="line">            return true;</div><div class="line">        &#125;elseif($data[&apos;sns_followstate&apos;] == 2)&#123;//相互关注</div><div class="line">            $this-&gt;db-&gt;trans_begin();</div><div class="line">            $this-&gt;addFollowFan($data);</div><div class="line">            $this-&gt;editFollowFans([&apos;sns_frommid&apos;=&gt;$data[&apos;sns_tomid&apos;],&apos;sns_tomid&apos;=&gt;$data[&apos;sns_frommid&apos;]],[&apos;sns_followstate&apos;=&gt;2]);</div><div class="line">            if($this-&gt;db-&gt;trans_status() === false)&#123;</div><div class="line">                $this-&gt;db-&gt;trans_rollback();</div><div class="line">                return false;</div><div class="line">            &#125;else&#123;</div><div class="line">                $this-&gt;db-&gt;trans_commit();</div><div class="line">                $this-&gt;cache-&gt;redis-&gt;zAdd(&apos;shc_follow:&apos;.$data[&apos;sns_frommid&apos;],time(),$data[&apos;sns_tomid&apos;]);</div><div class="line">                $this-&gt;cache-&gt;redis-&gt;zAdd(&apos;shc_fans:&apos;.$data[&apos;sns_tomid&apos;],time(),$data[&apos;sns_frommid&apos;]);</div><div class="line">                return true;</div><div class="line">            &#125;</div><div class="line">        &#125;else&#123;</div><div class="line">            return false;</div><div class="line">        &#125;</div><div class="line">    &#125;</div></pre></td></tr></table></figure></p>
+<h3 id="2-取消关注"><a href="#2-取消关注" class="headerlink" title="2.取消关注"></a>2.取消关注</h3><p>取消关注也分为2个步骤，第一步从我的关注列表中删除对方，第二步从对方的粉丝列表中<br>删除我，这里用redis的’zrem’来实现从有序集合中删除记录，<a href="https://redis.io/commands/zrem" target="_blank" rel="external">redis zrem命令</a><br><figure class="highlight plain"><table><tr><td class="gutter"><pre><div class="line">1</div><div class="line">2</div><div class="line">3</div><div class="line">4</div><div class="line">5</div><div class="line">6</div><div class="line">7</div><div class="line">8</div><div class="line">9</div><div class="line">10</div><div class="line">11</div><div class="line">12</div><div class="line">13</div><div class="line">14</div><div class="line">15</div><div class="line">16</div><div class="line">17</div><div class="line">18</div><div class="line">19</div><div class="line">20</div><div class="line">21</div><div class="line">22</div><div class="line">23</div><div class="line">24</div><div class="line">25</div><div class="line">26</div></pre></td><td class="code"><pre><div class="line">public function deleteFollowFansById($user_id,$follow_id,$state)&#123;</div><div class="line">        if($state == 1)&#123;</div><div class="line">            $result = $this-&gt;deleteFollowFans([&apos;sns_frommid&apos;=&gt;$user_id,&apos;sns_tomid&apos;=&gt;$follow_id]);</div><div class="line">            if($result)&#123;//缓存删除关注</div><div class="line">                $this-&gt;cache-&gt;redis-&gt;zRem(&apos;shc_follow:&apos;.$user_id,$follow_id);</div><div class="line">                $this-&gt;cache-&gt;redis-&gt;zRem(&apos;shc_fans:&apos;.$follow_id,$user_id);</div><div class="line">            &#125;</div><div class="line">            return true;</div><div class="line">        &#125;elseif($state == 2)&#123;</div><div class="line">            //开启事务</div><div class="line">            $this-&gt;db-&gt;trans_begin();</div><div class="line">            $this-&gt;deleteFollowFans([&apos;sns_frommid&apos;=&gt;$user_id,&apos;sns_tomid&apos;=&gt;$follow_id]);</div><div class="line">            $this-&gt;editFollowFans([&apos;sns_frommid&apos;=&gt;$follow_id,&apos;sns_tomid&apos;=&gt;$user_id],[&apos;sns_followstate&apos;=&gt;1]);</div><div class="line">            if($this-&gt;db-&gt;trans_status() === false)&#123;</div><div class="line">                $this-&gt;db-&gt;trans_rollback();</div><div class="line">                return false;</div><div class="line">            &#125;else&#123;</div><div class="line">                $this-&gt;cache-&gt;redis-&gt;zRem(&apos;shc_follow:&apos;.$user_id,$follow_id);</div><div class="line">                $this-&gt;cache-&gt;redis-&gt;zRem(&apos;shc_fans:&apos;.$follow_id,$user_id);</div><div class="line">                $this-&gt;db-&gt;trans_commit();</div><div class="line">                return true;</div><div class="line">            &#125;</div><div class="line">        &#125;else&#123;</div><div class="line">            return false;</div><div class="line">        &#125;</div><div class="line">    &#125;</div></pre></td></tr></table></figure></p>
+<h3 id="3-查看关注列表、粉丝列表"><a href="#3-查看关注列表、粉丝列表" class="headerlink" title="3.查看关注列表、粉丝列表"></a>3.查看关注列表、粉丝列表</h3><p>查看关注、粉丝列表原理一样，用redis的’zrange’，’zrange’的形式如下</p>
 <pre><code>ZRANGE KEY START STOP
-</code></pre><p>所以我们传入要获取的开始条数’curreng_page’，以及要获取的条数 = ‘current_page+page_size-1’，<br>这里因为redis开始是1所以要-1，而数据库是从0开始查询，代码如下：<br><a href="http://www.yiibai.com/redis/sorted_sets_zrange.html" target="_blank" rel="external">redis zrange命令</a></p>
-<pre><code>public function getFollowsListById($user_id,$limit=array()){
-      $follow_list = $this-&gt;cache-&gt;redis-&gt;zRevRange(&apos;shc_follow:&apos;.$user_id,$limit[&apos;current_page&apos;],$limit[&apos;current_page&apos;]+$limit[&apos;page_size&apos;]-1);
-      if($follow_list){
-          $member_list = $this-&gt;Member_Model-&gt;getMemberListByIdS($follow_list,&apos;user_id,user_nickname,user_portrait&apos;);
-          if($member_list) return $member_list;
-      }else{
-          return $this-&gt;getFollowsListByDb([&apos;a.sns_frommid&apos;=&gt;$user_id],&apos;b.user_id,b.user_nickname,b.user_portrait&apos;,$limit);
-      }
-  }
-</code></pre><h3 id="4-关注、粉丝数量"><a href="#4-关注、粉丝数量" class="headerlink" title="4.关注、粉丝数量"></a>4.关注、粉丝数量</h3><p>通过redis的’zcard’命令来返回有序集合的数量，也就是粉丝、关注的数量</p>
-<h3 id="5-关注状态"><a href="#5-关注状态" class="headerlink" title="5.关注状态"></a>5.关注状态</h3><p>关注状态分为3中类型，我当方面关注、你单方面关注、你我相互关注，所以很好理解，只要判断有序集合中是否存在记录就可以了，<br>这种可以用到redis的’zcore’命令，</p>
-<pre><code>//我关注你，你没关注我
-ZSCORE 1:follow 2 #ture
-ZSCORE 1:fans 2 #false
-
-//你关注我，我没关注你
+</code></pre><p>所以我们传入要获取的开始条数’curreng_page’，以及要获取的条数 = ‘current_page+page_size-1’，<br>这里因为redis开始是1所以要-1，而数据库是从0开始查询，代码如下：<br><a href="http://www.yiibai.com/redis/sorted_sets_zrange.html" target="_blank" rel="external">redis zrange命令</a><br>      <figure class="highlight plain"><table><tr><td class="gutter"><pre><div class="line">1</div><div class="line">2</div><div class="line">3</div><div class="line">4</div><div class="line">5</div><div class="line">6</div><div class="line">7</div><div class="line">8</div><div class="line">9</div></pre></td><td class="code"><pre><div class="line">public function getFollowsListById($user_id,$limit=array())&#123;</div><div class="line">         $follow_list = $this-&gt;cache-&gt;redis-&gt;zRevRange(&apos;shc_follow:&apos;.$user_id,$limit[&apos;current_page&apos;],$limit[&apos;current_page&apos;]+$limit[&apos;page_size&apos;]-1);</div><div class="line">         if($follow_list)&#123;</div><div class="line">             $member_list = $this-&gt;Member_Model-&gt;getMemberListByIdS($follow_list,&apos;user_id,user_nickname,user_portrait&apos;);</div><div class="line">             if($member_list) return $member_list;</div><div class="line">         &#125;else&#123;</div><div class="line">             return $this-&gt;getFollowsListByDb([&apos;a.sns_frommid&apos;=&gt;$user_id],&apos;b.user_id,b.user_nickname,b.user_portrait&apos;,$limit);</div><div class="line">         &#125;</div><div class="line">     &#125;</div></pre></td></tr></table></figure></p>
+<h3 id="4-关注、粉丝数量"><a href="#4-关注、粉丝数量" class="headerlink" title="4.关注、粉丝数量"></a>4.关注、粉丝数量</h3><p>通过redis的’zcard’命令来返回有序集合的数量，也就是粉丝、关注的数量</p>
+<h3 id="5-关注状态"><a href="#5-关注状态" class="headerlink" title="5.关注状态"></a>5.关注状态</h3><p>关注状态分为3中类型，我当方面关注、你单方面关注、你我相互关注，所以很好理解，只要判断有序集合中是否存在记录就可以了，<br>这种可以用到redis的’zcore’命令，<br>    ```<br>    //我关注你，你没关注我<br>    ZSCORE 1:follow 2 #ture<br>    ZSCORE 1:fans 2 #false</p>
+<pre><code>//你关注我，我没关注你
 ZSCORE 1:follow 2 #false
 ZSCORE 1:fans 2 #true
 
@@ -97,7 +19,7 @@ ZSCORE 1:fans 2 #true
 ZSCORE 1:follow 2 #true
 ZSCORE 1:fans 2 #true
 </code></pre><h2 id="总结"><a href="#总结" class="headerlink" title="总结"></a>总结</h2><p>通过redis我们实现了互粉的功能，类似的也可以实现评论的功能，这样我们就能够缓减mysql的压力。</p>
-</div><div class="article-meta"><div class="tags"><i class="icon icon-tag"></i><ul class="tag-list"><li class="tag-list-item"><a class="tag-list-link" href="/tags/ci/">ci</a><span class="tag-list-count">1</span></li><li class="tag-list-item"><a class="tag-list-link" href="/tags/php/">php</a><span class="tag-list-count">1</span></li><li class="tag-list-item"><a class="tag-list-link" href="/tags/redis/">redis</a><span class="tag-list-count">1</span></li></ul></div><div class="categories"><i class="icon icon-category"></i><ul class="category-list"><li class="category-list-item"><a class="category-list-link" href="/categories/redis/">redis</a><span class="category-list-count">1</span></li></ul></div></div><div class="article-comment"><div class="ds-thread" id="ds-thread" data-thread-key="ciy1889zv0001dwb61gt5etgk" data-title="使用redis实现互粉功能" data-url="http://yoursite.com/2017/01/17/使用redis实现互粉功能/" site-name="ueibo"></div><script>var siteName = document.getElementById('ds-thread').getAttribute('site-name');
+</div><div class="article-meta"><div class="tags"><i class="icon icon-tag"></i><ul class="tag-list"><li class="tag-list-item"><a class="tag-list-link" href="/tags/ci/">ci</a><span class="tag-list-count">1</span></li><li class="tag-list-item"><a class="tag-list-link" href="/tags/php/">php</a><span class="tag-list-count">1</span></li><li class="tag-list-item"><a class="tag-list-link" href="/tags/redis/">redis</a><span class="tag-list-count">1</span></li></ul></div><div class="categories"><i class="icon icon-category"></i><ul class="category-list"><li class="category-list-item"><a class="category-list-link" href="/categories/redis/">redis</a><span class="category-list-count">1</span></li></ul></div></div><div class="article-comment"><div class="ds-thread" id="ds-thread" data-thread-key="ciy18c4hk0000tcb6h2aa84it" data-title="使用redis实现互粉功能" data-url="http://yoursite.com/2017/01/17/使用redis实现互粉功能/" site-name="ueibo"></div><script>var siteName = document.getElementById('ds-thread').getAttribute('site-name');
 var duoshuoQuery = {short_name: siteName};
 (function() {
   var ds = document.createElement('script');
